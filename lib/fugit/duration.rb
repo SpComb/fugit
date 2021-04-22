@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 
 module Fugit
 
@@ -5,53 +6,70 @@ module Fugit
 
     attr_reader :original, :h, :options
 
-    def self.new(s)
+    class << self
 
-      parse(s)
-    end
+      def new(s)
 
-    def self.parse(s, opts={})
+        parse(s)
+      end
 
-      return s if s.is_a?(self)
+      def parse(s, opts={})
 
-      original = s
+        return s if s.is_a?(self)
 
-      s = "#{s}s" if s.is_a?(Numeric)
+        original = s
 
-      return nil unless s.is_a?(String)
+        s = "#{s}s" if s.is_a?(Numeric)
 
-      s = s.strip
+        return nil unless s.is_a?(String)
+
+        s = s.strip
 #p [ original, s ]; Raabro.pp(Parser.parse(s, debug: 3), colours: true)
 
-      h =
-        if opts[:iso]
-          IsoParser.parse(opts[:stricter] ? s : s.upcase)
-        elsif opts[:plain]
-          Parser.parse(s)
-        else
-          Parser.parse(s) || IsoParser.parse(opts[:stricter] ? s : s.upcase)
-        end
-#p h
+        h =
+          if opts[:iso]
+            IsoParser.parse(opts[:stricter] ? s : s.upcase)
+          elsif opts[:plain]
+            Parser.parse(s)
+          else
+            Parser.parse(s) || IsoParser.parse(opts[:stricter] ? s : s.upcase)
+          end
 
-      h ? self.allocate.send(:init, original, opts, h) : nil
-    end
+        h ? self.allocate.send(:init, original, opts, h) : nil
+      end
 
-    def self.do_parse(s, opts={})
+      def do_parse(s, opts={})
 
-      parse(s, opts) || fail(ArgumentError.new("not a duration #{s.inspect}"))
+        parse(s, opts) ||
+        fail(ArgumentError.new("not a duration #{s.inspect}"))
+      end
+
+      def to_plain_s(o); do_parse(o).deflate.to_plain_s; end
+      def to_iso_s(o); do_parse(o).deflate.to_iso_s; end
+      def to_long_s(o, opts={}); do_parse(o).deflate.to_long_s(opts); end
+
+      def common_rewrite_dur(t)
+
+        t
+          .subgather(nil)
+          .inject({}) { |h, tt|
+            v = tt.string; v = v.index('.') ? v.to_f : v.to_i
+              # drops ending ("y", "m", ...) by itself
+            h[tt.name] = (h[tt.name] || 0) + v
+            h }
+      end
     end
 
     KEYS = {
-      yea: { a: 'Y', r: 'y', i: 'Y', s: 365 * 24 * 3600, x: 0, l: 'year' },
-      mon: { a: 'M', r: 'M', i: 'M', s: 30 * 24 * 3600, x: 1, l: 'month' },
-      wee: { a: 'W', r: 'w', i: 'W', s: 7 * 24 * 3600, I: true, l: 'week' },
-      day: { a: 'D', r: 'd', i: 'D', s: 24 * 3600, I: true, l: 'day' },
+      yea: { a: 'Y', r: 'y', i: 'Y', s: YEAR_S, x: 0, l: 'year' },
+      mon: { a: 'M', r: 'M', i: 'M', s: 30 * DAY_S, x: 1, l: 'month' },
+      wee: { a: 'W', r: 'w', i: 'W', s: 7 * DAY_S, I: true, l: 'week' },
+      day: { a: 'D', r: 'd', i: 'D', s: DAY_S, I: true, l: 'day' },
       hou: { a: 'h', r: 'h', i: 'H', s: 3600, I: true, l: 'hour' },
       min: { a: 'm', r: 'm', i: 'M', s: 60, I: true, l: 'minute' },
-      sec: { a: 's', r: 's', i: 'S', s: 1, I: true, l: 'second' },
-    }
+      sec: { a: 's', r: 's', i: 'S', s: 1, I: true, l: 'second' } }.freeze
     INFLA_KEYS, NON_INFLA_KEYS =
-      KEYS.partition { |k, v| v[:I] }
+      KEYS.partition { |k, v| v[:I] }.freeze
 
     def _to_s(key)
 
@@ -103,12 +121,6 @@ module Fugit
       s.string
     end
 
-    class << self
-      def to_plain_s(o); do_parse(o).deflate.to_plain_s; end
-      def to_iso_s(o); do_parse(o).deflate.to_iso_s; end
-      def to_long_s(o, opts={}); do_parse(o).deflate.to_long_s(opts); end
-    end
-
     # For now, let's alias to #h
     #
     def to_h; h; end
@@ -128,7 +140,7 @@ module Fugit
 
     def inflate
 
-      h =
+      params =
         @h.inject({ sec: 0 }) { |h, (k, v)|
           a = KEYS[k]
           if a[:I]
@@ -139,7 +151,7 @@ module Fugit
           h
         }
 
-      self.class.allocate.init(@original, {}, h)
+      self.class.allocate.init(@original, {}, params)
     end
 
     # Round float seconds to 9 decimals when deflating
@@ -184,9 +196,9 @@ module Fugit
 
     def opposite
 
-      h = @h.inject({}) { |h, (k, v)| h[k] = -v; h }
+      params = @h.inject({}) { |h, (k, v)| h[k] = -v; h }
 
-      self.class.allocate.init(nil, {}, h)
+      self.class.allocate.init(nil, {}, params)
     end
 
     alias -@ opposite
@@ -201,9 +213,9 @@ module Fugit
 
     def add_duration(d)
 
-      h = d.h.inject(@h.dup) { |h, (k, v)| h[k] = (h[k] || 0) + v; h }
+      params = d.h.inject(@h.dup) { |h, (k, v)| h[k] = (h[k] || 0) + v; h }
 
-      self.class.allocate.init(nil, {}, h)
+      self.class.allocate.init(nil, {}, params)
     end
 
     def add_to_time(t)
@@ -308,18 +320,6 @@ module Fugit
       self
     end
 
-    def self.common_rewrite_dur(t)
-
-      t
-        .subgather(nil)
-        .inject({}) { |h, t|
-          v = t.string; v = v.index('.') ? v.to_f : v.to_i
-            # drops ending ("y", "m", ...) by itself
-          h[t.name] = (h[t.name] || 0) + v
-          h
-        }
-    end
-
     module Parser include Raabro
 
       # piece parsers bottom to top
@@ -328,12 +328,12 @@ module Fugit
 
       def yea(i); rex(:yea, i, /(\d+\.\d*|(\d*\.)?\d+) *y(ears?)?/i); end
       def mon(i); rex(:mon, i, /(\d+\.\d*|(\d*\.)?\d+) *(M|months?)/); end
-      def wee(i); rex(:wee, i, /(\d+\.\d*|(\d*\.)?\d+) *(weeks?|w)/i); end
-      def day(i); rex(:day, i, /(\d+\.\d*|(\d*\.)?\d+) *(days?|d)/i); end
-      def hou(i); rex(:hou, i, /(\d+\.\d*|(\d*\.)?\d+) *(hours?|h)/i); end
-      def min(i); rex(:min, i, /(\d+\.\d*|(\d*\.)?\d+) *(mins?|minutes?|m)/); end
+      def wee(i); rex(:wee, i, /(\d+\.\d*|(\d*\.)?\d+) *w(eeks?)?/i); end
+      def day(i); rex(:day, i, /(\d+\.\d*|(\d*\.)?\d+) *d(ays?)?/i); end
+      def hou(i); rex(:hou, i, /(\d+\.\d*|(\d*\.)?\d+) *h(ours?)?/i); end
+      def min(i); rex(:min, i, /(\d+\.\d*|(\d*\.)?\d+) *m(in(ute)?s?)?/); end
 
-      def sec(i); rex(:sec, i, /(\d+\.\d*|(\d*\.)?\d+) *(secs?|seconds?|s)/i); end 
+      def sec(i); rex(:sec, i, /(\d+\.\d*|(\d*\.)?\d+) *s(ec(ond)?)?s?/i); end
       def sek(i); rex(:sec, i, /(\d+\.\d*|\.\d+|\d+)$/); end
 
       def elt(i); alt(nil, i, :yea, :mon, :wee, :day, :hou, :min, :sec, :sek); end

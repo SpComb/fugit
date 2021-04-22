@@ -1,32 +1,39 @@
+# frozen_string_literal: true
 
 module Fugit
 
-  def self.isostamp(show_date, show_time, show_usec, time)
+  DAY_S = (24 * 3600).freeze
+  YEAR_S = (365 * DAY_S).freeze
 
-    t = time || Time.now
-    s = StringIO.new
+  class << self
 
-    s << t.strftime('%Y-%m-%d') if show_date
-    s << t.strftime('T%H:%M:%S') if show_time
-    s << sprintf('.%06d', t.usec) if show_time && show_usec
-    s << 'Z' if show_time && time.utc?
+    def isostamp(show_date, show_time, show_usec, time)
 
-    s.string
-  end
+      t = time || Time.now
+      s = StringIO.new
 
-  def self.time_to_s(t)
+      s << t.strftime('%Y-%m-%d') if show_date
+      s << t.strftime('T%H:%M:%S') if show_time
+      s << sprintf('.%06d', t.usec) if show_time && show_usec
+      s << 'Z' if show_time && time.utc?
 
-    isostamp(true, true, false, t)
-  end
+      s.string
+    end
 
-  def self.time_to_plain_s(t=Time.now, z=true)
+    def time_to_s(t)
 
-    t.strftime('%Y-%m-%d %H:%M:%S') + (z && t.utc? ? ' Z' : '')
-  end
+      isostamp(true, true, false, t)
+    end
 
-  def self.time_to_zone_s(t=Time.now)
+    def time_to_plain_s(t=Time.now, z=true)
 
-    t.strftime('%Y-%m-%d %H:%M:%S %Z %z')
+      t.strftime('%Y-%m-%d %H:%M:%S') + (z && t.utc? ? ' Z' : '')
+    end
+
+    def time_to_zone_s(t=Time.now)
+
+      t.strftime('%Y-%m-%d %H:%M:%S %Z %z')
+    end
   end
 end
 

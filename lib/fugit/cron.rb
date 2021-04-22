@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 
 module Fugit
 
@@ -11,11 +12,15 @@ module Fugit
       '@weekly' => '0 0 * * 0',
       '@daily' => '0 0 * * *',
       '@midnight' => '0 0 * * *',
-      '@hourly' => '0 * * * *',
-    }
+      '@noon' => '0 12 * * *',
+      '@hourly' => '0 * * * *' }.freeze
+    MAXDAYS = [
+      nil, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 ].freeze
 
-    attr_reader :original, :zone
-    attr_reader :minutes, :hours, :monthdays, :months, :weekdays, :timezone
+    attr_reader(
+      :original, :zone)
+    attr_reader(
+      :seconds, :minutes, :hours, :monthdays, :months, :weekdays, :timezone)
 
     class << self
 
@@ -28,7 +33,6 @@ module Fugit
 
         return s if s.is_a?(self)
 
-        original = s
         s = SPECIALS[s] || s
 
         return nil unless s.is_a?(String)
@@ -44,28 +48,27 @@ module Fugit
       def do_parse(s)
 
         parse(s) ||
-        fail(ArgumentError.new("not a cron string #{s.inspect}"))
+        fail(ArgumentError.new("invalid cron string #{s.inspect}"))
       end
     end
 
     def to_cron_s
 
-      @cron_s ||= begin
-        [
-          @seconds == [ 0 ] ? nil : (@seconds || [ '*' ]).join(','),
-          (@minutes || [ '*' ]).join(','),
-          (@hours || [ '*' ]).join(','),
-          (@monthdays || [ '*' ]).join(','),
-          (@months || [ '*' ]).join(','),
-          (@weekdays || [ [ '*' ] ]).map { |d| d.compact.join('#') }.join(','),
-          @timezone ? @timezone.to_s : nil
-        ].compact.join(' ')
-      end
+      @cron_s ||= [
+        @seconds == [ 0 ] ? nil : (@seconds || [ '*' ]).join(','),
+        (@minutes || [ '*' ]).join(','),
+        (@hours || [ '*' ]).join(','),
+        (@monthdays || [ '*' ]).join(','),
+        (@months || [ '*' ]).join(','),
+        (@weekdays || [ [ '*' ] ]).map { |d| d.compact.join('#') }.join(','),
+        @timezone ? @timezone.name : nil
+          ].compact.join(' ')
     end
 
     class TimeCursor
 
-      def initialize(t)
+      def initialize(cron, t)
+        @cron = cron
         @t = t.is_a?(TimeCursor) ? t.time : t
         @t.seconds = @t.seconds.to_i
       end
@@ -73,44 +76,59 @@ module Fugit
       def time; @t; end
       def to_i; @t.to_i; end
 
-      %w[ year month day wday hour min sec wday_in_month ]
+      %w[ year month day wday hour min sec wday_in_month rweek rday ]
         .collect(&:to_sym).each { |k| define_method(k) { @t.send(k) } }
 
-      def inc(i)
-        @t = @t + i
-        self
-      end
+      def inc(i); @t = @t + i; self; end
       def dec(i); inc(-i); end
 
       def inc_month
         y = @t.year
         m = @t.month + 1
         if m == 13; m = 1; y += 1; end
-        @t = ::EtOrbi.make(y, m)
+        @t = ::EtOrbi.make(y, m, @t.zone)
         self
       end
-      def inc_day; inc((24 - @t.hour) * 3600 - @t.min * 60 - @t.sec); end
-      def inc_hour; inc((60 - @t.min) * 60 - @t.sec); end
-      def inc_min; inc(60 - @t.sec); end
 
-      def inc_sec(seconds)
-        if s = seconds.find { |s| s > @t.sec }
-          inc(s - @t.sec)
+      def inc_day
+        inc((24 - @t.hour) * 3600 - @t.min * 60 - @t.sec)
+        #inc( - @t.hour * 3600) if @t.hour != 0 # compensate for entering DST
+        inc( - @t.hour * 3600) if @t.hour > 0 && @t.hour < 7
+      end
+      def inc_hour
+        inc((60 - @t.min) * 60 - @t.sec)
+      end
+      def inc_min
+        inc(60 - @t.sec)
+      end
+
+      def inc_sec
+        if sec = @cron.seconds.find { |s| s > @t.sec }
+          inc(sec - @t.sec)
         else
-          inc(60 - @t.sec + seconds.first)
+          inc(60 - @t.sec + @cron.seconds.first)
         end
       end
 
       def dec_month
-        dec(@t.day * 24 * 3600 + @t.hour * 3600 + @t.min * 60 + @t.sec + 1)
+        dec((@t.day - 1) * DAY_S + @t.hour * 3600 + @t.min * 60 + @t.sec + 1)
       end
-      def dec_day; dec(@t.hour * 3600 + @t.min * 60 + @t.sec + 1); end
-      def dec_hour; dec(@t.min * 60 + @t.sec + 1); end
-      def dec_min; dec(@t.sec + 1); end
 
-      def dec_sec(seconds)
-        target = seconds.reverse.find { |s| s < @t.sec } || seconds.last
-        inc(target - @t.sec)
+      def dec_day
+        dec(@t.hour * 3600 + @t.min * 60 + @t.sec + 1)
+      end
+      def dec_hour
+        dec(@t.min * 60 + @t.sec + 1)
+      end
+      def dec_min
+        dec(@t.sec + 1)
+      end
+
+      def dec_sec
+        target =
+          @cron.seconds.reverse.find { |s| s < @t.sec } ||
+          @cron.seconds.last
+        inc(target - @t.sec - (@t.sec > target ? 0 : 60))
       end
     end
 
@@ -119,14 +137,7 @@ module Fugit
     def min_match?(nt); ( ! @minutes) || @minutes.include?(nt.min); end
     def sec_match?(nt); ( ! @seconds) || @seconds.include?(nt.sec); end
 
-    def weekday_match?(nt)
-
-      return true if @weekdays.nil?
-
-      wd, hsh = @weekdays.find { |wd, hsh| wd == nt.wday }
-
-      return false unless wd
-      return true if hsh.nil?
+    def weekday_hash_match?(nt, hsh)
 
       phsh, nhsh = nt.wday_in_month
 
@@ -137,11 +148,32 @@ module Fugit
       end
     end
 
+    def weekday_modulo_match?(nt, mod)
+
+      (nt.rweek + mod[1]) % mod[0] == 0
+    end
+
+    def weekday_match?(nt)
+
+      return true if @weekdays.nil?
+
+      wd, hom = @weekdays.find { |d, _| d == nt.wday }
+
+      return false unless wd
+      return true if hom.nil?
+
+      if hom.is_a?(Array)
+        weekday_modulo_match?(nt, hom)
+      else
+        weekday_hash_match?(nt, hom)
+      end
+    end
+
     def monthday_match?(nt)
 
       return true if @monthdays.nil?
 
-      last = (TimeCursor.new(nt).inc_month.time - 24 * 3600).day + 1
+      last = (TimeCursor.new(self, nt).inc_month.time - 24 * 3600).day + 1
 
       @monthdays
         .collect { |d| d < 1 ? last + d : d }
@@ -152,6 +184,17 @@ module Fugit
 
       return weekday_match?(nt) || monthday_match?(nt) \
         if @weekdays && @monthdays
+          #
+          # From `man 5 crontab`
+          #
+          # Note: The day of a command's execution can be specified
+          # by two fields -- day of month, and day of week.
+          # If both fields are restricted (ie, are not *), the command will be
+          # run when either field matches the current time.
+          # For example, ``30 4 1,15 * 5'' would cause a command to be run
+          # at 4:30 am on the 1st and 15th of each month, plus every Friday.
+          #
+          # as seen in gh-5 and gh-35
 
       return false unless weekday_match?(nt)
       return false unless monthday_match?(nt)
@@ -161,44 +204,91 @@ module Fugit
 
     def match?(t)
 
-      t = Fugit.do_parse_at(t)
+      t = Fugit.do_parse_at(t).translate(@timezone)
 
       month_match?(t) && day_match?(t) &&
       hour_match?(t) && min_match?(t) && sec_match?(t)
     end
 
+    MAX_ITERATION_COUNT = 2048
+      #
+      # See gh-15 and tst/iteration_count.rb
+      #
+      # Initially set to 1024 after seeing the worst case for #next_time
+      # at 167 iterations, I placed it at 2048 after experimenting with
+      # gh-18 and noticing some > 1024 for some experiments. 2048 should
+      # be ok.
+
     def next_time(from=::EtOrbi::EoTime.now)
 
       from = ::EtOrbi.make_time(from)
-      t = TimeCursor.new(from.translate(@timezone))
+      sfrom = from.strftime('%F|%T')
+      ifrom = from.to_i
+
+      i = 0
+      t = TimeCursor.new(self, from.translate(@timezone))
+        #
+        # the translation occurs in the timezone of
+        # this Fugit::Cron instance
+
+      zfrom = t.time.strftime('%z|%Z')
 
       loop do
-#p [ :l, Fugit.time_to_s(t.time) ]
-        (from.to_i == t.to_i) && (t.inc(1); next)
+
+        fail RuntimeError.new(
+          "too many loops for #{@original.inspect} #next_time, breaking, " +
+          "cron expression most likely invalid (Feb 30th like?), " +
+          "please fill an issue at https://git.io/fjJC9"
+        ) if (i += 1) > MAX_ITERATION_COUNT
+
+        (ifrom == t.to_i) && (t.inc(1); next)
         month_match?(t) || (t.inc_month; next)
         day_match?(t) || (t.inc_day; next)
         hour_match?(t) || (t.inc_hour; next)
         min_match?(t) || (t.inc_min; next)
-        sec_match?(t) || (t.inc_sec(@seconds); next)
+        sec_match?(t) || (t.inc_sec; next)
+
+        tt = t.time
+        st = tt.strftime('%F|%T')
+        zt = tt.strftime('%z|%Z')
+          #
+        if st == sfrom && zt != zfrom
+          from, sfrom, zfrom, ifrom = tt, st, zt, t.to_i
+          next
+        end
+          #
+          # when transitioning out of DST, this prevents #next_time from
+          # yielding the same literal time twice in a row, see gh-6
+
         break
       end
 
       t.time.translate(from.zone)
+        #
+        # the answer time is in the same timezone as the `from`
+        # starting point
     end
 
     def previous_time(from=::EtOrbi::EoTime.now)
 
       from = ::EtOrbi.make_time(from)
-      t = TimeCursor.new(from.translate(@timezone))
+
+      i = 0
+      t = TimeCursor.new(self, (from - 1).translate(@timezone))
 
       loop do
-#p [ :l, Fugit.time_to_s(t.time) ]
-        (from.to_i == t.to_i) && (t.inc(-1); next)
+
+        fail RuntimeError.new(
+          "too many loops for #{@original.inspect} #previous_time, breaking, " +
+          "cron expression most likely invalid (Feb 30th like?), " +
+          "please fill an issue at https://git.io/fjJCQ"
+        ) if (i += 1) > MAX_ITERATION_COUNT
+
         month_match?(t) || (t.dec_month; next)
         day_match?(t) || (t.dec_day; next)
         hour_match?(t) || (t.dec_hour; next)
         min_match?(t) || (t.dec_min; next)
-        sec_match?(t) || (t.dec_sec(@seconds); next)
+        sec_match?(t) || (t.dec_sec; next)
         break
       end
 
@@ -223,6 +313,7 @@ module Fugit
           t = EtOrbi.make_time("#{year}-01-01") - 1
           t0 = nil
           t1 = nil
+
           loop do
             t1 = next_time(t)
             deltas << (t1 - t).to_i if t0
@@ -236,6 +327,41 @@ module Fugit
         end
     end
 
+    SLOTS = [
+      [ :seconds, 1, 60 ],
+      [ :minutes, 60, 60 ],
+      [ :hours, 3600, 24 ],
+      [ :days, DAY_S, 365 ] ].freeze
+
+    def rough_frequency
+
+      slots = SLOTS
+        .collect { |k, v0, v1|
+          a = (k == :days) ? rough_days : instance_variable_get("@#{k}")
+          [ k, v0, v1, a ] }
+
+      slots.each do |k, v0, _, a|
+        next if a == [ 0 ]
+        break if a != nil
+        return v0 if a == nil
+      end
+
+      slots.each do |k, v0, v1, a|
+        next unless a && a.length > 1
+        return (a + [ a.first + v1 ])
+          .each_cons(2)
+          .collect { |a0, a1| a1 - a0 }
+          .select { |d| d > 0 } # weed out zero deltas
+          .min * v0
+      end
+
+      slots.reverse.each do |k, v0, v1, a|
+        return v0 * v1 if a && a.length == 1
+      end
+
+      1 # second
+    end
+
     class Frequency
 
       attr_reader :span, :delta_min, :delta_max, :occurrences
@@ -247,7 +373,7 @@ module Fugit
 
         @delta_min = deltas.min; @delta_max = deltas.max
         @occurrences = deltas.size
-        @span_years = span / (365 * 24 * 3600)
+        @span_years = span / YEAR_S
         @yearly_occurrences = @occurrences.to_f / @span_years
       end
 
@@ -269,6 +395,16 @@ module Fugit
       [ @seconds, @minutes, @hours, @monthdays, @months, @weekdays ]
     end
 
+    def to_h
+
+      { seconds: @seconds,
+        minutes: @minutes,
+        hours: @hours,
+        monthdays: @monthdays,
+        months: @months,
+        weekdays: @weekdays }
+    end
+
     def ==(o)
 
       o.is_a?(::Fugit::Cron) && o.to_a == to_a
@@ -281,6 +417,47 @@ module Fugit
     end
 
     protected
+
+    def compact_month_days
+
+      return true if @months == nil || @monthdays == nil
+
+      ms, ds =
+        @months.inject([ [], [] ]) { |a, m|
+          @monthdays.each { |d|
+            next if d > MAXDAYS[m]
+            a[0] << m; a[1] << d }
+          a }
+      @months = ms.uniq
+      @monthdays = ds.uniq
+
+      @months.any? && @monthdays.any?
+    end
+
+    def rough_days
+
+      return nil if @weekdays == nil && @monthdays == nil
+
+      months = (@months || (1..12).to_a)
+
+      monthdays = months
+        .product(@monthdays || [])
+        .collect { |m, d|
+          d = 31 + d if d < 0
+          (m - 1) * 30 + d } # rough
+
+      weekdays = (@weekdays || [])
+        .collect { |d, w|
+          w ?
+          d + (w - 1) * 7 :
+          (0..3).collect { |ww| d + ww * 7 } }
+        .flatten
+      weekdays = months
+        .product(weekdays)
+        .collect { |m, d| (m - 1) * 30 + d } # rough
+
+      (monthdays + weekdays).sort
+    end
 
     FREQUENCY_CACHE = {}
 
@@ -297,6 +474,8 @@ module Fugit
       determine_weekdays(h[:dow])
       determine_timezone(h[:tz])
 
+      return nil unless compact_month_days
+
       self
     end
 
@@ -311,10 +490,49 @@ module Fugit
 
       sla = 1 if sla == nil
       sta = min if sta == nil
-      edn = max if edn == nil
-      sta, edn = edn, sta if sta > edn
+      edn = max if edn == nil || edn < 0 && sta > 0
 
-      (sta..edn).step(sla).to_a
+      range(min, max, sta, edn, sla)
+    end
+
+    def range(min, max, sta, edn, sla)
+
+      fail ArgumentError.new(
+        'both start and end must be negative in ' +
+        { min: min, max: max, sta: sta, edn: edn, sla: sla }.inspect
+      ) if (sta < 0 && edn > 0) || (edn < 0 && sta > 0)
+
+      a = []
+
+      omin, omax = min, max
+      min, max = -max, -1 if sta < 0
+
+      cur = sta
+
+      loop do
+
+        a << cur
+        break if cur == edn
+
+        cur += 1
+        if cur > max
+          cur = min
+          edn = edn - max - 1 if edn > max
+        end
+
+        fail RuntimeError.new(
+          "too many loops for " +
+          { min: omin, max: omax, sta: sta, edn: edn, sla: sla }.inspect +
+          " #range, breaking, " +
+          "please fill an issue at https://git.io/fjJC9"
+        ) if a.length > 2 * omax
+          # there is a #uniq afterwards, hence the 2* for 0-24 and friends
+      end
+
+      a.each_with_index
+        .select { |e, i| i % sla == 0 }
+        .collect(&:first)
+        .uniq
     end
 
     def compact(key)
@@ -328,44 +546,46 @@ module Fugit
       arr.sort!
     end
 
-    def determine_seconds(a)
-      @seconds = (a || [ 0 ]).inject([]) { |a, r| a.concat(expand(0, 59, r)) }
+    def determine_seconds(arr)
+      @seconds = (arr || [ 0 ]).inject([]) { |a, s| a.concat(expand(0, 59, s)) }
       compact(:@seconds)
     end
 
-    def determine_minutes(a)
-      @minutes = a.inject([]) { |a, r| a.concat(expand(0, 59, r)) }
+    def determine_minutes(arr)
+      @minutes = arr.inject([]) { |a, m| a.concat(expand(0, 59, m)) }
       compact(:@minutes)
     end
 
-    def determine_hours(a)
-      @hours = a.inject([]) { |a, r| a.concat(expand(0, 23, r)) }
-      @hours = @hours.collect { |h| h == 24 ? 0 : h }
+    def determine_hours(arr)
+      @hours = arr
+        .inject([]) { |a, h| a.concat(expand(0, 23, h)) }
+        .collect { |h| h == 24 ? 0 : h }
       compact(:@hours)
     end
 
-    def determine_monthdays(a)
-      @monthdays = a.inject([]) { |a, r| a.concat(expand(1, 31, r)) }
+    def determine_monthdays(arr)
+      @monthdays = arr.inject([]) { |a, d| a.concat(expand(1, 31, d)) }
       compact(:@monthdays)
     end
 
-    def determine_months(a)
-      @months = a.inject([]) { |a, r| a.concat(expand(1, 12, r)) }
+    def determine_months(arr)
+      @months = arr.inject([]) { |a, m| a.concat(expand(1, 12, m)) }
       compact(:@months)
     end
 
-    def determine_weekdays(a)
+    def determine_weekdays(arr)
 
       @weekdays = []
 
-      a.each do |a, z, s, h| # a to z, slash and hash
-        if h
-          @weekdays << [ a, h ]
-        elsif s
-          ((a || 0)..(z || (a ? a : 6))).step(s < 1 ? 1 : s)
+      arr.each do |a, z, sl, ha, mo| # a to z, slash, hash, and mod
+        if ha || mo
+          @weekdays << [ a, ha || mo ]
+        elsif sl
+          ((a || 0)..(z || (a ? a : 6))).step(sl < 1 ? 1 : sl)
             .each { |i| @weekdays << [ i ] }
         elsif z
-          (a..z).each { |i| @weekdays << [ i ] }
+          z = z + 7 if a > z
+          (a..z).each { |i| @weekdays << [ (i > 6) ? i - 7 : i ] }
         elsif a
           @weekdays << [ a ]
         #else
@@ -374,6 +594,7 @@ module Fugit
 
       @weekdays.each { |wd| wd[0] = 0 if wd[0] == 7 } # turn sun7 into sun0
       @weekdays.uniq!
+      @weekdays.sort!
       @weekdays = nil if @weekdays.empty?
     end
 
@@ -384,10 +605,18 @@ module Fugit
 
     module Parser include Raabro
 
-      WEEKDAYS = %w[ sunday monday tuesday wednesday thursday friday saturday ]
-      WEEKDS = WEEKDAYS.collect { |d| d[0, 3] }
+      WEEKDAYS =
+        %w[ sunday monday tuesday wednesday thursday friday saturday ].freeze
 
-      MONTHS = %w[ - jan feb mar apr may jun jul aug sep oct nov dec ]
+      WEEKDS =
+        WEEKDAYS.collect { |d| d[0, 3] }.freeze
+      DOW_REX =
+        /([0-7]|#{WEEKDS.join('|')})/i.freeze
+
+      MONTHS =
+        %w[ - jan feb mar apr may jun jul aug sep oct nov dec ].freeze
+      MONTH_REX =
+        /(1[0-2]|0?[1-9]|#{MONTHS[1..-1].join('|')})/i.freeze
 
       # piece parsers bottom to top
 
@@ -398,19 +627,13 @@ module Fugit
 
       def slash(i); rex(:slash, i, /\/\d\d?/); end
 
-      def core_mos(i); rex(:mos, i, /[0-5]?\d/); end # min or sec
-      def core_hou(i); rex(:hou, i, /(2[0-4]|[01]?[0-9])/); end
-      def core_dom(i); rex(:dom, i, /(-?(3[01]|[012]?[0-9])|last|l)/i); end
-      def core_mon(i); rex(:mon, i, /(1[0-2]|0?[0-9]|#{MONTHS[1..-1].join('|')})/i); end
-      def core_dow(i); rex(:dow, i, /([0-7]|#{WEEKDS.join('|')})/i); end
+      def mos(i); rex(:mos, i, /[0-5]?\d/); end # min or sec
+      def hou(i); rex(:hou, i, /(2[0-4]|[01]?[0-9])/); end
+      def dom(i); rex(:dom, i, /(-?(3[01]|[12][0-9]|0?[1-9])|last|l)/i); end
+      def mon(i); rex(:mon, i, MONTH_REX); end
+      def dow(i); rex(:dow, i, DOW_REX); end
 
       def dow_hash(i); rex(:hash, i, /#(-?[1-5]|last|l)/i); end
-
-      def mos(i); core_mos(i); end
-      def hou(i); core_hou(i); end
-      def dom(i); core_dom(i); end
-      def mon(i); core_mon(i); end
-      def dow(i); core_dow(i); end
 
       def _mos(i); seq(nil, i, :hyphen, :mos); end
       def _hou(i); seq(nil, i, :hyphen, :hou); end
@@ -433,22 +656,32 @@ module Fugit
       def sor_dow(i); alt(nil, i, :star, :r_dow); end
 
       # sorws: star or range with[out] slash
-      def sorws_mos(i); seq(:elt, i, :sor_mos, :slash, '?'); end
-      def sorws_hou(i); seq(:elt, i, :sor_hou, :slash, '?'); end
-      def sorws_dom(i); seq(:elt, i, :sor_dom, :slash, '?'); end
-      def sorws_mon(i); seq(:elt, i, :sor_mon, :slash, '?'); end
-      def sorws_dow(i); seq(:elt, i, :sor_dow, :slash, '?'); end
+      def sorws_mos(i); seq(nil, i, :sor_mos, :slash, '?'); end
+      def sorws_hou(i); seq(nil, i, :sor_hou, :slash, '?'); end
+      def sorws_dom(i); seq(nil, i, :sor_dom, :slash, '?'); end
+      def sorws_mon(i); seq(nil, i, :sor_mon, :slash, '?'); end
+      def sorws_dow(i); seq(nil, i, :sor_dow, :slash, '?'); end
 
-      def h_dow(i); seq(:elt, i, :core_dow, :dow_hash); end
+      # ssws: slash or sorws
+      def mos_elt(i); alt(:elt, i, :slash, :sorws_mos); end
+      def hou_elt(i); alt(:elt, i, :slash, :sorws_hou); end
+      def dom_elt(i); alt(:elt, i, :slash, :sorws_dom); end
+      def mon_elt(i); alt(:elt, i, :slash, :sorws_mon); end
+      def dow_elt(i); alt(:elt, i, :slash, :sorws_dow); end
 
-      def _sorws_dow(i); alt(nil, i, :h_dow, :sorws_dow); end
+      def mod(i); rex(:mod, i, /%\d+(\+\d+)?/); end
 
-      def list_sec(i); jseq(:sec, i, :sorws_mos, :comma); end
-      def list_min(i); jseq(:min, i, :sorws_mos, :comma); end
-      def list_hou(i); jseq(:hou, i, :sorws_hou, :comma); end
-      def list_dom(i); jseq(:dom, i, :sorws_dom, :comma); end
-      def list_mon(i); jseq(:mon, i, :sorws_mon, :comma); end
-      def list_dow(i); jseq(:dow, i, :_sorws_dow, :comma); end
+      def mod_dow(i); seq(:elt, i, :dow, :mod); end
+      def h_dow(i); seq(:elt, i, :dow, :dow_hash); end
+
+      def dow_elt_(i); alt(nil, i, :h_dow, :mod_dow, :dow_elt); end
+
+      def list_sec(i); jseq(:sec, i, :mos_elt, :comma); end
+      def list_min(i); jseq(:min, i, :mos_elt, :comma); end
+      def list_hou(i); jseq(:hou, i, :hou_elt, :comma); end
+      def list_dom(i); jseq(:dom, i, :dom_elt, :comma); end
+      def list_mon(i); jseq(:mon, i, :mon_elt, :comma); end
+      def list_dow(i); jseq(:dow, i, :dow_elt_, :comma); end
 
       def lsec_(i); seq(nil, i, :list_sec, :s); end
       def lmin_(i); seq(nil, i, :list_min, :s); end
@@ -458,7 +691,7 @@ module Fugit
       alias ldow list_dow
 
       def _tz_name(i)
-        rex(nil, i, / +[A-Z][a-zA-Z0-9]+(\/[A-Z][a-zA-Z0-9_]+){0,2}/)
+        rex(nil, i, / +[A-Z][a-zA-Z0-9+\-]+(\/[A-Z][a-zA-Z0-9+\-_]+){0,2}/)
       end
       def _tz_delta(i)
         rex(nil, i, / +[-+]([01][0-9]|2[0-4]):?(00|15|30|45)/)
@@ -478,7 +711,7 @@ module Fugit
 
       # rewriting the parsed tree
 
-      def to_i(k, t)
+      def rewrite_bound(k, t)
 
         s = t.string.downcase
 
@@ -488,23 +721,40 @@ module Fugit
         s.to_i
       end
 
+      def rewrite_mod(k, t)
+
+        mod, plus = t.string
+          .split(/[%+]/).reject(&:empty?).collect(&:to_i)
+
+        [ mod, plus || 0 ]
+      end
+
       def rewrite_elt(k, t)
 
-        (a, z), others = t
-          .subgather(nil)
-          .partition { |tt| ![ :hash, :slash ].include?(tt.name) }
-        s = others.find { |tt| tt.name == :slash }
-        h = others.find { |tt| tt.name == :hash }
+        at, zt, slt, hat, mot = nil; t.subgather(nil).each do |tt|
+          case tt.name
+          when :slash then slt = tt
+          when :hash then hat = tt
+          when :mod then mot = tt
+          else if at; zt ||= tt; else; at = tt; end
+          end
+        end
 
-        h = h ? h.string[1..-1] : nil
-        h = -1 if h && h.upcase[0, 1] == 'L'
-        h = h.to_i if h
+        sl = slt ? slt.string[1..-1].to_i : nil
 
-        a = a ? to_i(k, a) : nil
-        z = z ? to_i(k, z) : nil
-        a, z = z, a if a && z && a > z
+        ha = hat ? hat.string[1..-1] : nil
+        ha = -1 if ha && ha.upcase[0, 1] == 'L'
+        ha = ha.to_i if ha
 
-        [ a, z, s ? s.string[1..-1].to_i : nil, h ]
+        mo = mot ? rewrite_mod(k, mot) : nil
+
+        a = at ? rewrite_bound(k, at) : nil
+        z = zt ? rewrite_bound(k, zt) : nil
+
+        #a, z = z, a if a && z && a > z
+          # handled downstream since gh-27
+
+        [ a, z, sl, ha, mo ]
       end
 
       def rewrite_entry(t)
@@ -516,7 +766,7 @@ module Fugit
 
       def rewrite_tz(t)
 
-        s = t.string.strip
+        s = t.strim
         z = EtOrbi.get_tzone(s)
 
         [ s, z ]
@@ -524,8 +774,12 @@ module Fugit
 
       def rewrite_cron(t)
 
-        hcron = t
+        st = t
           .sublookup(nil) # go to :ccron or :scron
+
+        return nil unless st
+
+        hcron = st
           .subgather(nil) # list min, hou, mon, ...
           .inject({}) { |h, tt|
             h[tt.name] = tt.name == :tz ? rewrite_tz(tt) : rewrite_entry(tt)

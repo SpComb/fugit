@@ -1,6 +1,10 @@
 
+*.swp
 .vimrc
 .viminfo
+.vimgrep
+.vimspec
+.vimmarks
 
 pkg/
 
